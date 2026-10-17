@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tend"
+version = "0.1.0"
+description = "A health report for all your git repos: READMEs, licenses, staleness, and committed secrets."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "laufferw" }]
+dependencies = []
+
+[project.scripts]
+tend = "tend:main"
+
+[tool.setuptools]
+py-modules = ["tend"]
