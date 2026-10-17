@@ -102,6 +102,9 @@ replaces a `README.draft.md` only if `tend` wrote it.
   in a public repo, assume it has already been copied.
 - **Secret detection is pattern-based.** It skips obvious placeholders (`xxxx`,
   `your-key`, `example`, `test`) and anything inside vendored dependency folders.
+  A committed `.env` isn't flagged when every variable in it is browser-public by
+  design (`VITE_`, `NEXT_PUBLIC_`, `EXPO_PUBLIC_`, `PUBLIC_`, `REACT_APP_`), since
+  those values ship in the app's JavaScript anyway.
   It can still miss custom token formats, or flag an unusual-but-harmless string.
   Findings show the file and line, never the secret itself.
 - **"Stale" isn't "bad".** A finished project with no commits in a year is fine. The

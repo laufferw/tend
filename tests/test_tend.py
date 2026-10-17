@@ -186,6 +186,13 @@ class SecretsTest(Base):
             "secret-looking file tracked: deploy/key.pem",
         ])
 
+    def test_env_with_only_public_vars_is_not_a_secret(self):
+        found = self.scan({
+            "web/.env": "VITE_SUPABASE_URL=https://x.supabase.co\nVITE_SUPABASE_PUBLISHABLE_KEY=abc\n",
+            "api/.env": "VITE_URL=x\nDATABASE_URL=postgres://u:p@h/db\n",
+        })
+        self.assertEqual(found, ["secret-looking file tracked: api/.env"])
+
     def test_vendored_matches_skipped(self):
         found = self.scan({"node_modules/pkg/test.js": f'k = "{FAKE_AWS}"\n'})
         self.assertEqual(found, [])

@@ -161,10 +161,28 @@ def is_placeholder(token: str) -> bool:
     return bool(PLACEHOLDER.search(token)) or len(set(token)) < 8
 
 
+# Frontend build tools inline these into the shipped JavaScript, so they are
+# public by design (e.g. a Supabase publishable key in a Vite app's .env).
+PUBLIC_ENV_PREFIXES = ("VITE_", "NEXT_PUBLIC_", "EXPO_PUBLIC_", "PUBLIC_", "REACT_APP_")
+
+
+def is_public_env(path: Path) -> bool:
+    """True for a .env file whose every variable is a browser-public one."""
+    if not re.search(r"(^|/)\.env(\.[\w.-]+)?$", str(path)):
+        return False
+    names = [
+        line.split("=", 1)[0].strip().removeprefix("export ").strip()
+        for line in _read(path).splitlines()
+        if "=" in line and not line.lstrip().startswith("#")
+    ]
+    return bool(names) and all(n.startswith(PUBLIC_ENV_PREFIXES) for n in names)
+
+
 def scan_secrets(repo: Path, files: list[str]) -> list[Finding]:
     findings = []
     for f in files:
-        if SECRET_FILE.search(f) and not f.endswith(SAFE_SUFFIXES) and not VENDORED.search(f):
+        if (SECRET_FILE.search(f) and not f.endswith(SAFE_SUFFIXES) and not VENDORED.search(f)
+                and not is_public_env(repo / f)):
             findings.append(Finding("secrets", CRITICAL, f"secret-looking file tracked: {f}", 40))
 
     args = ["grep", "-I", "-n", "-E", "--no-color"]
