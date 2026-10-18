@@ -1,3 +1,4 @@
+import base64
 import contextlib
 import datetime as dt
 import io
@@ -18,6 +19,15 @@ GOOD_README = "# app\n\n" + "This app does a useful thing for the people who nee
 FAKE_AWS = "AKIA" + "Q7R2M9KX4TBW8ZPL"
 FAKE_GH = "ghp_" + "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5"
 KEY_HEADER = "-----BEGIN RSA " + "PRIVATE KEY-----"
+LONG_VALUE = "Zq8vR2mK" + "4pL9xN3wT7yB5c"
+
+
+def b64(obj):
+    return base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")
+
+
+def fake_jwt(claims):
+    return ".".join([b64({"alg": "HS256", "typ": "JWT"}), b64(claims), "s1gnatureAbc123XyZ456"])
 
 
 def run_git(repo, *args, when=None):
@@ -136,6 +146,18 @@ class CheckRepoTest(Base):
         for label in ("node_modules is committed", "__pycache__ is committed", ".DS_Store is committed"):
             self.assertIn(label, msgs)
 
+    def test_tend_toml_skips_checks(self):
+        repo = make_repo(self.root / "notes", {
+            "notes.md": "x",
+            ".tend.toml": '# private notes\nskip = ["license", "gitignore", "nonsense"]\n',
+        })
+        report = tend.check_repo(repo)
+        self.assertNotIn("license", self.checks(report))
+        self.assertNotIn("gitignore", self.checks(report))
+        self.assertIn(".tend.toml: unknown check 'nonsense'", self.messages(report))
+        self.assertEqual(report.skipped, ["gitignore", "license"])
+        self.assertIn("(skips: gitignore, license)", tend.render_text([report]))
+
     def test_dirty_and_unpushed(self):
         upstream = make_repo(self.root / "up", HEALTHY)
         clone = self.root / "clone"
@@ -184,6 +206,26 @@ class SecretsTest(Base):
         self.assertEqual(sorted(found), [
             "secret-looking file tracked: .env",
             "secret-looking file tracked: deploy/key.pem",
+        ])
+
+    def test_jwts_flagged_except_supabase_anon_keys(self):
+        found = self.scan({
+            "notes.md": f"Gong secret: {fake_jwt({'sub': 'svc-1234', 'exp': 1999999999})}\n",
+            "client.ts": f'const key = "{fake_jwt({"iss": "supabase", "role": "anon"})}"\n',
+        })
+        self.assertEqual(found, ["JWT / bearer token in notes.md:1"])
+
+    def test_values_after_labels(self):
+        found = self.scan({
+            "notes.md": f"## API creds\nSecret: {LONG_VALUE}\npassword = '{LONG_VALUE}'\n",
+            "app.py": "api_key = process.env.OPENAI_API_KEY_2024\n"
+                      "token = 'abc'\n"
+                      "TOKEN=MY_SERVICE_TOKEN_V2_NAME\n",
+            "page.html": f"<script data-cf-beacon='{{\"token\":\"{LONG_VALUE}\"}}'></script>\n",
+        })
+        self.assertEqual(found, [
+            "value after 'Secret' label in notes.md:2",
+            "value after 'password' label in notes.md:3",
         ])
 
     def test_env_with_only_public_vars_is_not_a_secret(self):

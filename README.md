@@ -53,7 +53,8 @@ B (75+), C (60+), D (40+), or F.
 | Check | Finding | Points |
 |-------|---------|-------:|
 | Secrets | A tracked file that looks like a credential (`.env`, `*.pem`, `id_rsa`, `credentials.json`, ...) | −40 each |
-| Secrets | A token pattern in tracked text (AWS, GitHub, Anthropic, OpenAI, Slack, Google, Stripe, private-key headers) | −40 each |
+| Secrets | A token pattern in tracked text (AWS, GitHub, Anthropic, OpenAI, Slack, Google, Stripe, JWTs, private-key headers) | −40 each |
+| Secrets | A long value written after a label like `secret:`, `token =`, `password:` or `api_key=` | −40 each |
 | Commits | No commits yet | −40 |
 | README | Missing | −25 |
 | README | Nearly empty (under 80 characters of real text), or unchanged scaffold boilerplate (Lovable, Vite, Create React App, Next.js, Astro, dbt) | −20 |
@@ -67,6 +68,19 @@ B (75+), C (60+), D (40+), or F.
 
 The summary under the table ranks fixes by how many repos need them, so you can
 work through one kind of fix at a time.
+
+### Skipping checks for a repo
+
+Not every check fits every repo. For example, a private notes repo doesn't need a
+license. Add a `.tend.toml` to that repo:
+
+```toml
+skip = ["license", "activity"]
+```
+
+Check names: `secrets`, `readme`, `commits`, `license`, `gitignore`, `junk`,
+`unpushed`, `remote`, `dirty`, `activity`. Skipped checks are listed next to the
+repo in the report, so they stay visible.
 
 ## `--fix`: README drafts
 
@@ -104,7 +118,12 @@ replaces a `README.draft.md` only if `tend` wrote it.
   `your-key`, `example`, `test`) and anything inside vendored dependency folders.
   A committed `.env` isn't flagged when every variable in it is browser-public by
   design (`VITE_`, `NEXT_PUBLIC_`, `EXPO_PUBLIC_`, `PUBLIC_`, `REACT_APP_`), since
-  those values ship in the app's JavaScript anyway.
+  those values ship in the app's JavaScript anyway. For the same reason,
+  Supabase "anon" JWTs and Cloudflare analytics beacon tokens are ignored.
+- **Labeled values need a digit and a letter, and must be 20+ characters.** That
+  skips references like `process.env.API_KEY` and `ENV_VAR_NAMES`, but it also means a
+  short password written after `password:` won't be caught. Identifiers such as
+  OAuth client IDs aren't treated as secrets.
   It can still miss custom token formats, or flag an unusual-but-harmless string.
   Findings show the file and line, never the secret itself.
 - **"Stale" isn't "bad".** A finished project with no commits in a year is fine. The

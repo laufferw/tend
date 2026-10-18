@@ -10,6 +10,7 @@ missing READMEs from each repo's own files. Standard library only.
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import json
 import re
@@ -19,7 +20,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 SKIP_DIRS = {"node_modules", ".venv", "venv", "__pycache__", "dist", "build", "target"}
 
@@ -46,7 +47,17 @@ SECRET_PATTERNS = {
     "Google API key": r"AIza[0-9A-Za-z_-]{35}",
     "Stripe live key": r"sk_live_[0-9A-Za-z]{24,}",
     "Private key": r"-----BEGIN ([A-Z]+ )?PRIVATE KEY-----",
+    "JWT / bearer token": r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
 }
+# A long value written right after a label like "secret:" or "api_key =".
+# Catches credentials pasted into notes or config that match no vendor format.
+LABELS = r"secret|token|password|passwd|api[ _-]?key|client[ _-]?secret|access[ _-]?key"
+LABELED_GREP = r"(" + LABELS + r")[\"'`]?[[:space:]]*[:=]"
+LABELED = re.compile(
+    r"\b(" + LABELS + r")\b[\"'`]?\s*[:=]\s*[\"'`]?([A-Za-z0-9_\-./+=]{20,})", re.I)
+NOT_A_VALUE = re.compile(r"^(process\.env|os\.environ|import\.meta|env\.|self\.|this\.|config\.|settings\.)")
+CHECKS = ("secrets", "readme", "commits", "license", "gitignore", "junk", "unpushed", "remote",
+          "dirty", "activity")
 PLACEHOLDER = re.compile(r"x{4,}|X{4,}|your|example|placeholder|dummy|fake|redacted|test|\.\.\.|<|\*{3,}", re.I)
 SECRET_FILE = re.compile(
     r"(^|/)(\.env(\.[\w.-]+)?|id_rsa|id_ed25519|id_ecdsa"
@@ -78,6 +89,7 @@ class Report:
     path: str
     last_commit: str | None
     findings: list[Finding] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
 
     @property
     def score(self) -> int:
@@ -161,6 +173,30 @@ def is_placeholder(token: str) -> bool:
     return bool(PLACEHOLDER.search(token)) or len(set(token)) < 8
 
 
+def is_public_jwt(token: str) -> bool:
+    """True for a Supabase anon/publishable JWT, which ships to browsers by design."""
+    try:
+        payload = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (IndexError, ValueError):
+        return False
+    return isinstance(claims, dict) and claims.get("role") == "anon"
+
+
+def labeled_value(content: str) -> str | None:
+    """The secret-looking value after a "secret:"-style label, if there is one."""
+    m = LABELED.search(content)
+    # Cloudflare's analytics beacon token is embedded in public pages by design.
+    if not m or "cf-beacon" in content:
+        return None
+    value = m.group(2)
+    if (NOT_A_VALUE.search(value) or is_placeholder(value)
+            or not re.search(r"\d", value) or not re.search(r"[A-Za-z]", value)
+            or re.fullmatch(r"[A-Z0-9_.]+", value)):  # an ENV_VAR_NAME, not a value
+        return None
+    return value
+
+
 # Frontend build tools inline these into the shipped JavaScript, so they are
 # public by design (e.g. a Supabase publishable key in a Vite app's .env).
 PUBLIC_ENV_PREFIXES = ("VITE_", "NEXT_PUBLIC_", "EXPO_PUBLIC_", "PUBLIC_", "REACT_APP_")
@@ -185,32 +221,44 @@ def scan_secrets(repo: Path, files: list[str]) -> list[Finding]:
                 and not is_public_env(repo / f)):
             findings.append(Finding("secrets", CRITICAL, f"secret-looking file tracked: {f}", 40))
 
-    args = ["grep", "-I", "-n", "-E", "--no-color"]
+    # -i only widens this prefilter; each line is re-checked case-sensitively below.
+    args = ["grep", "-I", "-i", "-n", "-E", "--no-color", "-e", LABELED_GREP]
     for pattern in SECRET_PATTERNS.values():
         args += ["-e", pattern]
     out = git(repo, *args, check=False)  # exit 1 just means no matches
     # Token must start at a word boundary, so "task-list_x" isn't read as "sk-list_x".
     compiled = {label: re.compile(r"(?<![\w-])" + p) for label, p in SECRET_PATTERNS.items()}
-    seen = set()
     for line in out.splitlines():
         location, _, content = line.partition(":")
         lineno, _, content = content.partition(":")
-        if VENDORED.search(location):
+        if VENDORED.search(location) or location == ".tend.toml":
             continue
-        for label, rx in compiled.items():
+        label = None
+        for name, rx in compiled.items():
             m = rx.search(content)
             if not m:
                 continue
             token = m.group(0)
-            if label != "Private key" and is_placeholder(token):
-                break
-            key = (location, label)
-            if key not in seen:
-                seen.add(key)
-                # Location only: never echo any part of a secret.
-                findings.append(Finding("secrets", CRITICAL, f"{label} in {location}:{lineno}", 40))
+            if name == "Private key":
+                label = name
+            elif name == "JWT / bearer token":
+                label = None if is_placeholder(token) or is_public_jwt(token) else name
+            elif not is_placeholder(token):
+                label = name
             break
+        if label is None and labeled_value(content):
+            label = f"value after '{LABELED.search(content).group(1)}' label"
+        if label:
+            # Location only: never echo any part of a secret.
+            findings.append(Finding("secrets", CRITICAL, f"{label} in {location}:{lineno}", 40))
     return findings
+
+
+def read_config(repo: Path) -> tuple[set[str], list[str]]:
+    """Checks to skip from .tend.toml (`skip = ["license"]`), plus any unknown names."""
+    m = re.search(r"^\s*skip\s*=\s*\[(.*?)\]", _read(repo / ".tend.toml"), re.M | re.S)
+    names = re.findall(r"[\"']([^\"']+)[\"']", m.group(1)) if m else []
+    return {n for n in names if n in CHECKS}, [n for n in names if n not in CHECKS]
 
 
 def check_repo(repo: Path, today: dt.date | None = None) -> Report:
@@ -261,6 +309,12 @@ def check_repo(repo: Path, today: dt.date | None = None) -> Report:
         add(Finding("dirty", INFO, f"{len(dirty)} uncommitted change{'s' if len(dirty) != 1 else ''}", 5))
 
     report.findings.extend(scan_secrets(repo, files))
+
+    skip, unknown = read_config(repo)
+    report.skipped = sorted(skip)
+    report.findings = [f for f in report.findings if f.check not in skip]
+    for name in unknown:  # not add(): the list was just replaced
+        report.findings.append(Finding("config", INFO, f".tend.toml: unknown check '{name}'", 0))
     return report
 
 
@@ -397,6 +451,8 @@ def render_text(reports: list[Report]) -> str:
     lines = []
     for r in reports:
         issues = " · ".join(f.message for f in r.findings) or "all good"
+        if r.skipped:
+            issues += f"  (skips: {', '.join(r.skipped)})"
         lines.append(f"{r.grade} {r.score:>3}  {r.name:<{width}}  {issues}")
     return "\n".join(lines)
 
@@ -426,6 +482,7 @@ def summary(reports: list[Report]) -> str:
         "remote": "no remote",
         "dirty": "uncommitted changes",
         "activity": "no commits in 6+ months",
+        "config": "problems in .tend.toml",
     }
     order = list(labels)
     needs = sum(1 for r in reports if r.findings)
